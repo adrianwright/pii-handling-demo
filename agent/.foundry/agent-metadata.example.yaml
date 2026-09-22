@@ -1,0 +1,5 @@
+defaultEnvironment: demo
+environments:
+  demo:
+    azd:
+      environmentName: YOUR_AZD_ENVIRONMENT

@@ -1,0 +1,242 @@
+<policies>
+  <inbound>
+    <base />
+    <set-variable name="stage" value="validation" />
+    <rate-limit-by-key calls="30" renewal-period="60" counter-key="@(context.Subscription.Id)" />
+    <choose>
+      <when condition="@(context.Request.Url.Query.Count != 0)">
+        <return-response>
+          <set-status code="400" reason="Bad Request" />
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-header name="Cache-Control" exists-action="override"><value>no-store</value></set-header>
+          <set-body>@(new JObject(new JProperty("code", "INVALID_REQUEST"), new JProperty("message", "Query parameters are not accepted. Send the subscription key in the header."), new JProperty("requestId", context.RequestId.ToString())).ToString())</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <!-- Detect then immediately reject: prevent can return schema errors containing submitted values. -->
+    <validate-content unspecified-content-type-action="detect" max-size="32768" size-exceeded-action="detect" errors-variable-name="validationErrors">
+      <content type="application/json" validate-as="json" schema-id="university-pii-demo-request" action="detect" case-insensitive-property-names="false" />
+    </validate-content>
+    <choose>
+      <when condition="@(context.Variables.ContainsKey(&quot;validationErrors&quot;) &amp;&amp; ((IEnumerable&lt;object&gt;)context.Variables[&quot;validationErrors&quot;]).Any())">
+        <return-response>
+          <set-status code="400" reason="Bad Request" />
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-header name="Cache-Control" exists-action="override"><value>no-store</value></set-header>
+          <set-body>@(new JObject(new JProperty("code", "INVALID_REQUEST"), new JProperty("message", "Expected a JSON synthetic demo request with either prompt or user messages, within the documented limits."), new JProperty("requestId", context.RequestId.ToString())).ToString())</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <set-variable name="userMessages" value="@{
+        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+        if (body[&quot;prompt&quot;] != null)
+        {
+            return new JArray(new JObject(new JProperty(&quot;role&quot;, &quot;user&quot;), new JProperty(&quot;content&quot;, (string)body[&quot;prompt&quot;]))).ToString();
+        }
+        return ((JArray)body[&quot;messages&quot;]).ToString();
+    }" />
+    <set-variable name="stage" value="redaction" />
+    <!-- A fresh request prevents client headers, credentials, and query strings from reaching either backend. -->
+    <send-request mode="new" response-variable-name="languageResponse" timeout="20" ignore-error="false">
+      <set-url>{{pii-demo-language-endpoint}}/language/:analyze-text?api-version=2024-11-01</set-url>
+      <set-method>POST</set-method>
+      <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+      <set-body>@{
+          var messages = JArray.Parse((string)context.Variables["userMessages"]);
+          var documents = new JArray();
+          for (var i = 0; i &lt; messages.Count; i++)
+          {
+              documents.Add(new JObject(new JProperty("id", i.ToString()), new JProperty("language", "en"), new JProperty("text", (string)messages[i]["content"])));
+          }
+          return new JObject(
+              new JProperty("kind", "PiiEntityRecognition"),
+              new JProperty("parameters", new JObject(
+                  new JProperty("modelVersion", "2023-09-01"),
+                  new JProperty("stringIndexType", "Utf16CodeUnit"),
+                  new JProperty("loggingOptOut", true),
+                  new JProperty("piiCategories", new JArray("Person", "Email", "PhoneNumber")))),
+              new JProperty("analysisInput", new JObject(new JProperty("documents", documents)))).ToString();
+      }</set-body>
+      <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+    </send-request>
+    <choose>
+      <when condition="@(((IResponse)context.Variables[&quot;languageResponse&quot;]).StatusCode != 200)">
+        <return-response>
+          <set-status code="503" reason="Service Unavailable" />
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-header name="Cache-Control" exists-action="override"><value>no-store</value></set-header>
+          <set-body>@(new JObject(new JProperty("code", "PII_REDACTION_FAILED"), new JProperty("message", "Required PII redaction is unavailable. Nothing was sent to Foundry."), new JProperty("requestId", context.RequestId.ToString())).ToString())</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <set-variable name="languageBody" value="@(((IResponse)context.Variables[&quot;languageResponse&quot;]).Body.As&lt;string&gt;())" />
+    <set-variable name="redactionResult" value="@{
+        var messages = JArray.Parse((string)context.Variables[&quot;userMessages&quot;]);
+        var response = JObject.Parse((string)context.Variables[&quot;languageBody&quot;]);
+        var results = response[&quot;results&quot;] as JObject;
+        if ((string)response[&quot;kind&quot;] != &quot;PiiEntityRecognitionResults&quot; || results == null) { throw new Exception(&quot;Invalid PII result envelope&quot;); }
+        var errors = results[&quot;errors&quot;] as JArray;
+        var documents = results[&quot;documents&quot;] as JArray;
+        if (errors == null || errors.Count != 0 || documents == null || documents.Count != messages.Count) { throw new Exception(&quot;Incomplete PII results&quot;); }
+        var seen = new HashSet&lt;string&gt;();
+        var counts = new Dictionary&lt;string, int&gt;();
+        var labels = new Dictionary&lt;string, string&gt; { { &quot;Person&quot;, &quot;PERSON&quot; }, { &quot;Email&quot;, &quot;EMAIL&quot; }, { &quot;PhoneNumber&quot;, &quot;PHONE&quot; } };
+        var total = 0;
+        for (var i = 0; i &lt; messages.Count; i++)
+        {
+            var id = i.ToString();
+            var matching = documents.Where(d =&gt; (string)d[&quot;id&quot;] == id).ToArray();
+            if (matching.Length != 1 || !seen.Add(id)) { throw new Exception(&quot;Invalid PII document IDs&quot;); }
+            var document = matching[0];
+            var entities = document[&quot;entities&quot;] as JArray;
+            var warnings = document[&quot;warnings&quot;] as JArray;
+            if (entities == null || warnings == null || warnings.Count != 0 || document[&quot;redactedText&quot;]?.Type != JTokenType.String) { throw new Exception(&quot;Invalid or truncated PII document&quot;); }
+            var text = (string)messages[i][&quot;content&quot;];
+            var cursor = 0;
+            var rewritten = new StringBuilder();
+            foreach (var entity in entities.OrderBy(e =&gt; (int)e[&quot;offset&quot;]))
+            {
+                var category = (string)entity[&quot;category&quot;];
+                if (category == null || !labels.ContainsKey(category) || entity[&quot;offset&quot;]?.Type != JTokenType.Integer || entity[&quot;length&quot;]?.Type != JTokenType.Integer || entity[&quot;text&quot;]?.Type != JTokenType.String) { throw new Exception(&quot;Invalid PII entity&quot;); }
+                var offset = (int)entity[&quot;offset&quot;];
+                var length = (int)entity[&quot;length&quot;];
+                if (offset &lt; cursor || length &lt;= 0 || offset &gt; text.Length || length &gt; text.Length - offset || text.Substring(offset, length) != (string)entity[&quot;text&quot;]) { throw new Exception(&quot;Invalid PII entity span&quot;); }
+                counts[category] = counts.ContainsKey(category) ? counts[category] + 1 : 1;
+                rewritten.Append(text.Substring(cursor, offset - cursor));
+                rewritten.Append(&quot;[&quot; + labels[category] + &quot;_&quot; + counts[category].ToString() + &quot;]&quot;);
+                cursor = offset + length;
+                total++;
+            }
+            rewritten.Append(text.Substring(cursor));
+            messages[i][&quot;content&quot;] = rewritten.ToString();
+        }
+        return new JObject(new JProperty(&quot;status&quot;, total == 0 ? &quot;ALLOWED&quot; : &quot;REDACTED&quot;), new JProperty(&quot;count&quot;, total), new JProperty(&quot;categories&quot;, new JArray(counts.Keys.OrderBy(k =&gt; k))), new JProperty(&quot;messages&quot;, messages)).ToString();
+    }" />
+    <choose>
+      <when condition="@(&quot;{{pii-demo-backend-enabled}}&quot; != &quot;true&quot;)">
+        <return-response>
+          <set-status code="503" reason="Service Unavailable" />
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-header name="Cache-Control" exists-action="override"><value>no-store</value></set-header>
+          <set-body>@{
+              return new JObject(new JProperty("code", "BACKEND_NOT_CONFIGURED"),
+                  new JProperty("message", "Gateway redaction completed. The guarded Foundry agent is not configured; no model was invoked."),
+                  new JProperty("requestId", context.RequestId.ToString()),
+                  new JProperty("telemetry", new JObject(new JProperty("apimValidation", "ALLOWED"), new JProperty("piiRedaction", JObject.Parse((string)context.Variables["redactionResult"])), new JProperty("foundry", "NOT_RUN")))).ToString();
+          }</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <set-variable name="stage" value="foundry" />
+    <send-request mode="new" response-variable-name="foundryResponse" timeout="120" ignore-error="false">
+      <set-url>{{pii-demo-foundry-endpoint}}/openai/responses?api-version=2025-11-15-preview</set-url>
+      <set-method>POST</set-method>
+      <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+      <set-body>@{
+          var redaction = JObject.Parse((string)context.Variables["redactionResult"]);
+          return new JObject(
+              new JProperty("agent", new JObject(new JProperty("type", "agent_reference"), new JProperty("name", "{{pii-demo-agent-name}}"), new JProperty("version", "{{pii-demo-agent-version}}"))),
+              new JProperty("input", redaction["messages"]),
+              new JProperty("store", false),
+              new JProperty("stream", false)).ToString();
+      }</set-body>
+      <authentication-managed-identity resource="https://ai.azure.com" />
+    </send-request>
+    <set-variable name="stage" value="output" />
+    <set-variable name="backendStatus" value="@(((IResponse)context.Variables[&quot;foundryResponse&quot;]).StatusCode)" />
+    <set-variable name="safeResult" value="@{
+        var backend = (IResponse)context.Variables[&quot;foundryResponse&quot;];
+        if (backend.StatusCode == 401 || backend.StatusCode == 403)
+        {
+            return new JObject(new JProperty(&quot;httpStatus&quot;, 502), new JProperty(&quot;code&quot;, &quot;BACKEND_AUTHORIZATION_FAILED&quot;), new JProperty(&quot;output&quot;, null)).ToString();
+        }
+        var body = backend.Body.As&lt;JObject&gt;();
+        var code = &quot;BACKEND_FAILED&quot;;
+        var status = 502;
+        var text = new StringBuilder();
+        var errorCode = (string)body.SelectToken(&quot;error.code&quot;);
+        var innerCode = (string)body.SelectToken(&quot;error.innererror.code&quot;);
+        var filters = body.SelectToken(&quot;error.innererror.content_filter_result&quot;) as JObject;
+        if (filters == null) { filters = body.SelectToken(&quot;error.innererror.content_filter_results&quot;) as JObject; }
+        var annotations = body[&quot;content_filters&quot;] as JArray ?? body.SelectToken(&quot;error.content_filters&quot;) as JArray ?? new JArray();
+        var blocked = annotations.Where(a =&gt; (bool?)a[&quot;blocked&quot;] == true).ToArray();
+        if (blocked.Length != 0)
+        {
+            status = 422;
+            code = &quot;GUARDRAIL_BLOCKED&quot;;
+            if (blocked.Any(a =&gt; (string)a[&quot;source_type&quot;] == &quot;completion&quot; &amp;&amp; (bool?)a.SelectToken(&quot;content_filter_results.personally_identifiable_information.filtered&quot;) == true)) { code = &quot;PII_OUTPUT_BLOCKED&quot;; }
+            else if (blocked.Any(a =&gt; (string)a[&quot;source_type&quot;] == &quot;prompt&quot; &amp;&amp; (bool?)a.SelectToken(&quot;content_filter_results.jailbreak.filtered&quot;) == true)) { code = &quot;JAILBREAK_BLOCKED&quot;; }
+            else if (blocked.Any(a =&gt; (string)a[&quot;source_type&quot;] == &quot;prompt&quot; &amp;&amp; (bool?)a.SelectToken(&quot;content_filter_results.personally_identifiable_information.filtered&quot;) == true)) { code = &quot;PII_INPUT_BLOCKED&quot;; }
+        }
+        else if (errorCode == &quot;content_filter&quot; || innerCode == &quot;ResponsibleAIPolicyViolation&quot; || (string)body.SelectToken(&quot;incomplete_details.reason&quot;) == &quot;content_filter&quot;)
+        {
+            status = 422;
+            code = &quot;GUARDRAIL_BLOCKED&quot;;
+            if (backend.StatusCode == 400 &amp;&amp; filters != null &amp;&amp; (bool?)filters.SelectToken(&quot;jailbreak.filtered&quot;) == true) { code = &quot;JAILBREAK_BLOCKED&quot;; }
+            else if (filters != null &amp;&amp; (bool?)filters.SelectToken(&quot;pii.filtered&quot;) == true)
+            {
+                if ((string)body.SelectToken(&quot;incomplete_details.reason&quot;) == &quot;content_filter&quot;) { code = &quot;PII_OUTPUT_BLOCKED&quot;; }
+                else if (backend.StatusCode == 400) { code = &quot;PII_INPUT_BLOCKED&quot;; }
+            }
+        }
+        else if (backend.StatusCode == 429 &amp;&amp; errorCode == &quot;rate_limit_exceeded&quot;)
+        {
+            code = &quot;BACKEND_RATE_LIMITED&quot;;
+            status = 429;
+        }
+        else if (backend.StatusCode == 200 &amp;&amp; (string)body[&quot;status&quot;] == &quot;completed&quot; &amp;&amp; body[&quot;error&quot;]?.Type != JTokenType.Object)
+        {
+            var output = body[&quot;output&quot;] as JArray;
+            if (output == null) { throw new Exception(&quot;Missing agent output&quot;); }
+            foreach (var item in output)
+            {
+                if ((string)item[&quot;type&quot;] != &quot;message&quot; || (string)item[&quot;role&quot;] != &quot;assistant&quot;) { continue; }
+                if ((string)item[&quot;status&quot;] != &quot;completed&quot;) { throw new Exception(&quot;Incomplete assistant output&quot;); }
+                var content = item[&quot;content&quot;] as JArray;
+                if (content == null) { throw new Exception(&quot;Missing message content&quot;); }
+                foreach (var part in content)
+                {
+                    var type = (string)part[&quot;type&quot;];
+                    if (type != &quot;output_text&quot; &amp;&amp; type != &quot;refusal&quot;) { throw new Exception(&quot;Unsupported output content&quot;); }
+                    var value = type == &quot;output_text&quot; ? part[&quot;text&quot;] : part[&quot;refusal&quot;];
+                    if (value?.Type != JTokenType.String) { throw new Exception(&quot;Invalid assistant text&quot;); }
+                    if (text.Length != 0) { text.AppendLine(); }
+                    text.Append((string)value);
+                }
+            }
+            if (text.Length == 0) { throw new Exception(&quot;Empty assistant output&quot;); }
+            code = &quot;SAFE_RESPONSE&quot;;
+            status = 200;
+            if (Regex.IsMatch(text.ToString(), @&quot;\bU\d{7}\b&quot;)) { code = &quot;STUDENT_ID_OUTPUT_BLOCKED&quot;; status = 422; text.Clear(); }
+        }
+        return new JObject(new JProperty(&quot;httpStatus&quot;, status), new JProperty(&quot;code&quot;, code), new JProperty(&quot;output&quot;, status == 200 ? text.ToString() : null)).ToString();
+    }" />
+    <return-response>
+      <set-status code="@((int)JObject.Parse((string)context.Variables[&quot;safeResult&quot;])[&quot;httpStatus&quot;])" reason="Gateway result" />
+      <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+      <set-header name="Cache-Control" exists-action="override"><value>no-store</value></set-header>
+      <set-body>@{
+          var result = JObject.Parse((string)context.Variables["safeResult"]);
+          result.Remove("httpStatus");
+          result["requestId"] = context.RequestId.ToString();
+          result["telemetry"] = new JObject(new JProperty("apimValidation", "ALLOWED"), new JProperty("piiRedaction", JObject.Parse((string)context.Variables["redactionResult"])), new JProperty("foundry", (string)result["code"] == "SAFE_RESPONSE" ? "COMPLETED" : "BLOCKED_OR_FAILED"));
+          return result.ToString();
+      }</set-body>
+    </return-response>
+  </inbound>
+  <!-- All backend calls use mode=new; never forward the original request as a fallback. -->
+  <backend />
+  <outbound />
+  <on-error>
+    <return-response>
+      <set-status code="@(context.LastError.Reason == &quot;SubscriptionKeyNotFound&quot; || context.LastError.Reason == &quot;SubscriptionKeyInvalid&quot; ? 401 : (context.LastError.Reason == &quot;RateLimitExceeded&quot; ? 429 : ((string)context.Variables.GetValueOrDefault&lt;string&gt;(&quot;stage&quot;, &quot;validation&quot;) == &quot;validation&quot; ? 400 : 503)))" reason="Request blocked" />
+      <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+      <set-header name="Cache-Control" exists-action="override"><value>no-store</value></set-header>
+      <set-body>@{
+          var stage = context.Variables.GetValueOrDefault&lt;string&gt;("stage", "validation");
+          var code = context.LastError.Reason == "SubscriptionKeyNotFound" || context.LastError.Reason == "SubscriptionKeyInvalid" ? "SUBSCRIPTION_REQUIRED" : (context.LastError.Reason == "RateLimitExceeded" ? "RATE_LIMITED" : (stage == "validation" ? "INVALID_REQUEST" : (stage == "redaction" ? "PII_REDACTION_FAILED" : "BACKEND_FAILED")));
+          return new JObject(new JProperty("code", code), new JProperty("message", "The request could not complete safely. No unverified response was released."), new JProperty("requestId", context.RequestId.ToString()), new JProperty("diagnostic", new JObject(new JProperty("stage", stage), new JProperty("reason", context.LastError.Reason), new JProperty("source", context.LastError.Source), new JProperty("backendStatus", context.Variables.GetValueOrDefault&lt;int&gt;("backendStatus", 0))))).ToString();
+      }</set-body>
+    </return-response>
+  </on-error>
+</policies>

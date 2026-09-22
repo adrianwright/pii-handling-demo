@@ -1,0 +1,7 @@
+name: university-pii-demo
+metadata:
+  template: university-pii-demo@0.0.1
+infra:
+  provider: bicep
+  path: infra
+  module: main

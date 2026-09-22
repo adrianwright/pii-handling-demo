@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["demo", "scenarioId"],
+  "properties": {
+    "demo": { "type": "boolean", "enum": [true] },
+    "scenarioId": {
+      "type": "string",
+      "enum": ["safe-summary", "ingress-redaction", "instruction-refusal", "jailbreak", "residual-pii"]
+    },
+    "prompt": { "type": "string", "minLength": 1, "maxLength": 5000, "pattern": "\\S" },
+    "messages": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "content"],
+        "properties": {
+          "role": { "type": "string", "enum": ["user"] },
+          "content": { "type": "string", "minLength": 1, "maxLength": 5000, "pattern": "\\S" }
+        }
+      }
+    }
+  },
+  "oneOf": [
+    { "required": ["prompt"], "not": { "required": ["messages"] } },
+    { "required": ["messages"], "not": { "required": ["prompt"] } }
+  ]
+}

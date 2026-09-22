@@ -1,0 +1,24 @@
+{
+  "name": "student-support-cases",
+  "fields": [
+    { "name": "case_id", "type": "Edm.String", "key": true, "searchable": false, "filterable": true, "sortable": true, "facetable": false, "retrievable": true },
+    { "name": "case_reference", "type": "Edm.String", "searchable": true, "analyzer": "keyword", "filterable": false, "sortable": false, "facetable": false, "retrievable": true },
+    { "name": "title", "type": "Edm.String", "searchable": true, "analyzer": "en.microsoft", "filterable": false, "sortable": false, "facetable": false, "retrievable": true },
+    { "name": "content", "type": "Edm.String", "searchable": true, "analyzer": "en.microsoft", "filterable": false, "sortable": false, "facetable": false, "retrievable": true },
+    { "name": "case_type", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false, "facetable": true, "retrievable": true },
+    { "name": "office", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false, "facetable": true, "retrievable": true },
+    { "name": "status", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false, "facetable": true, "retrievable": true },
+    { "name": "program", "type": "Edm.String", "searchable": false, "filterable": true, "sortable": false, "facetable": true, "retrievable": true },
+    { "name": "next_action", "type": "Edm.String", "searchable": true, "analyzer": "en.microsoft", "filterable": false, "sortable": false, "facetable": false, "retrievable": true },
+    { "name": "due_date", "type": "Edm.DateTimeOffset", "filterable": true, "sortable": true, "facetable": false, "retrievable": true },
+    { "name": "is_synthetic", "type": "Edm.Boolean", "filterable": true, "sortable": false, "facetable": true, "retrievable": true },
+    { "name": "student_id", "type": "Edm.String", "searchable": false, "filterable": false, "sortable": false, "facetable": false, "retrievable": true },
+    { "name": "student_name", "type": "Edm.String", "searchable": false, "filterable": false, "sortable": false, "facetable": false, "retrievable": true },
+    { "name": "email", "type": "Edm.String", "searchable": false, "filterable": false, "sortable": false, "facetable": false, "retrievable": true },
+    { "name": "phone", "type": "Edm.String", "searchable": false, "filterable": false, "sortable": false, "facetable": false, "retrievable": true },
+    { "name": "date_of_birth", "type": "Edm.String", "searchable": false, "filterable": false, "sortable": false, "facetable": false, "retrievable": true },
+    { "name": "ssn", "type": "Edm.String", "searchable": false, "filterable": false, "sortable": false, "facetable": false, "retrievable": true },
+    { "name": "address", "type": "Edm.String", "searchable": false, "filterable": false, "sortable": false, "facetable": false, "retrievable": true },
+    { "name": "private_notes", "type": "Edm.String", "searchable": false, "filterable": false, "sortable": false, "facetable": false, "retrievable": true }
+  ]
+}
