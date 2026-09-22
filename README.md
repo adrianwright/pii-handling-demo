@@ -1,4 +1,4 @@
-# University Student Advisor PII Safety Demo
+# University PII Safety Demo
 
 This repository demonstrates defense-in-depth controls for a university
 student-support chatbot. A local web app sends synthetic prompts through Azure
